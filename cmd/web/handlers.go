@@ -66,12 +66,14 @@ func (app *application) snippetView(w http.ResponseWriter, r *http.Request) {
 }
 
 // Define a struct to represent the form data and validation errors for the form fields.
+// Include struct tags which tell the decoder how to store the value from the HTML form data.
+// The struct tag `form:"-"` tells the decoder to completely ignore a field during decoding.
+
 type snippetCreateForm struct {
-	Title       string
-	Content     string
-	Expires     int
-	FieldErrors map[string]string
-	validator.Validator
+	Title               string `form:"title"`
+	Content             string `form:"content"`
+	Expires             int    `form:"expires"`
+	validator.Validator `form:"-"`
 }
 
 func (app *application) snippetCreate(w http.ResponseWriter, r *http.Request) {
@@ -94,38 +96,26 @@ func (app *application) snippetCreate(w http.ResponseWriter, r *http.Request) {
 
 func (app *application) snippetCreatePost(w http.ResponseWriter, r *http.Request) {
 
-	// r.ParseForm() adds any data in the POST request bodies to the r.PostForm map.
-	// This works in the same way for PUT and PATCH requests.
-	err := r.ParseForm()
+	// Declare a new empty instance of a snippetCreateForm struct to store the form data and a validator.
+	var form snippetCreateForm
+
+	// Decode the relevant values from the HTML form into the snippetCreateForm struct.
+	err := app.decodePostForm(r, &form)
 	if err != nil {
+		// The client entered form data that was not valid.
 		app.clientError(w, http.StatusBadRequest)
 		return
-	}
-
-	// Retrieve the value of the expired field (number of days as an integer) from the r.Postform map.
-	expires, err := strconv.Atoi(r.PostForm.Get("expires"))
-	if err != nil {
-		app.clientError(w, http.StatusBadRequest)
-		return
-	}
-
-	// Initialize a snippetCreateForm struct to store the form data and any validation errors.
-	// Initialize a map to hold any validation errors on the form data.
-	form := snippetCreateForm{
-		Title:   r.PostForm.Get("title"),
-		Content: r.PostForm.Get("content"),
-		Expires: expires,
 	}
 
 	// Check that the title is not blank and not more than 100 characters in length.
-	form.CheckField(form.NotBlank(form.Title), "title", "This field cannot be blank")
-	form.CheckField(form.MaxChars(form.Title, 100), "title", "This field cannot be more than 100 characters long")
+	form.CheckField(validator.NotBlank(form.Title), "title", "This field cannot be blank")
+	form.CheckField(validator.MaxChars(form.Title, 100), "title", "This field cannot be more than 100 characters long")
 
 	// Check that the content is not blank.
-	form.CheckField(form.NotBlank(form.Content), "content", "This field cannot be blank")
+	form.CheckField(validator.NotBlank(form.Content), "content", "This field cannot be blank")
 
 	// Check that the expires value matches one of the permitted values (1, 7, 365).
-	form.CheckField(form.PermittedInt(form.Expires, 1, 7, 365), "expires", "This field must equal 1, 7, or 365")
+	form.CheckField(validator.PermittedValue(form.Expires, 1, 7, 365), "expires", "This field must equal 1, 7, or 365")
 
 	// If there are any validation errors in the form data, dump them into a plain HTTP response and return from the handler.
 	if !form.Valid() {
@@ -149,6 +139,183 @@ func (app *application) snippetCreatePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Use the Put() function to add a string value and corresponding key to the session data.
+	app.sessionManager.Put(r.Context(), "flash", "Snippet successfully created!")
+
 	// After inserting a new user into the database, redirect the user to the viewing page for the snippet they just created.
 	http.Redirect(w, r, fmt.Sprintf("/snippet/view/%d", id), http.StatusSeeOther)
+}
+
+type userSignupForm struct {
+	Name                string `form:"name"`
+	Email               string `form:"email"`
+	Password            string `form:"password"`
+	validator.Validator `form:"-"`
+}
+
+// Render and display the signup form for the client.
+func (app *application) userSignup(w http.ResponseWriter, r *http.Request) {
+
+	// Initialize a new templateData struct to store additional resources for the template execution.
+	data := app.newTemplateData(r)
+
+	// Intialize the data.Form field as a zeroed userSignupForm instance.
+	data.Form = userSignupForm{}
+
+	// Render the template for the signup.tmpl template.
+	app.render(w, http.StatusOK, "signup.tmpl", data)
+}
+
+func (app *application) userSignupPost(w http.ResponseWriter, r *http.Request) {
+	// Declare a zeroed instance of the userSignupForm struct to store form data and access the validator.
+	var form userSignupForm
+
+	// Decode the HTML form data into the userSignupForm struct.
+	// Return an HTTP 400 Response if the user attempts to sign up with data that cannot be decoded.
+	err := app.decodePostForm(r, &form)
+	if err != nil {
+		app.clientError(w, http.StatusBadRequest)
+		return
+	}
+
+	// Validate the form fields.
+
+	// Check that the name and email are not blank.
+	form.CheckField(validator.NotBlank(form.Name), "name", "This field cannot be blank")
+	form.CheckField(validator.NotBlank(form.Email), "email", "This field cannot be blank")
+
+	// Check that the email address is in a valid format.
+	form.CheckField(validator.Matches(form.Email, validator.EmailRX), "email", "This field must be a valid email address")
+
+	// Check that the password is not blank and at least 8 characters long.
+	form.CheckField(validator.NotBlank(form.Password), "password", "This field cannot be blank")
+	form.CheckField(validator.MinChars(form.Password, 8), "password", "This field must be at least 8 characters long")
+
+	// If there are any validation errors in the form data, dump them into a plain HTTP response and return from the handler.
+	if !form.Valid() {
+		// Initialize a new templateData struct to store additional resources for the template execution.
+		data := app.newTemplateData(r)
+
+		// Pass the userSignupForm instance as dynamic data in the Form field.
+		data.Form = form
+
+		// Re-render the singup.tmpl template in the case of any validation errors.
+		// Use the HTTP 422 Unprocessable Entity when sending the response to indicate that their was a form data validation error.
+		app.render(w, http.StatusUnprocessableEntity, "signup.tmpl", data)
+
+		return
+	}
+
+	// Attempt to create a new user in the database.
+	// If there is a duplicate email error, add an error message to the form and redisplay it.
+	err = app.users.Insert(form.Name, form.Email, form.Password)
+	if err != nil {
+		if errors.Is(err, models.ErrDuplicateEmail) {
+			form.AddFieldError("email", "Email address is already in use")
+
+			data := app.newTemplateData(r)
+			data.Form = form
+			app.render(w, http.StatusUnprocessableEntity, "signup.tmpl", data)
+		} else {
+			app.serverError(w, err)
+		}
+		return
+	}
+
+	// Add a confirmation flash message to the session confirming their signup worked.
+	app.sessionManager.Put(r.Context(), "flash", "Your signup was successful. Please log in.")
+
+	// Redirect the user to the login page.
+	http.Redirect(w, r, "/user/login", http.StatusSeeOther)
+}
+
+type userLoginForm struct {
+	Email               string `form:"email"`
+	Password            string `form:"password"`
+	validator.Validator `form:"-"`
+}
+
+func (app *application) userLogin(w http.ResponseWriter, r *http.Request) {
+	data := app.newTemplateData(r)
+	data.Form = userLoginForm{}
+	app.render(w, http.StatusOK, "login.tmpl", data)
+}
+
+func (app *application) userLoginPost(w http.ResponseWriter, r *http.Request) {
+	// Declare a zeroed instance of the userLoginForm struct to store form data and access the validator.
+	var form userLoginForm
+
+	// Decode the HTML form data into the userLoginForm struct.
+	// Return an HTTP 400 Response if the user attempts to log in with data that cannot be decoded.
+	err := app.decodePostForm(r, &form)
+	if err != nil {
+		app.clientError(w, http.StatusBadRequest)
+		return
+	}
+
+	// Validate the login form data.
+	form.CheckField(validator.NotBlank(form.Email), "email", "This field cannot be blank")
+	form.CheckField(validator.Matches(form.Email, validator.EmailRX), "email", "This field must be a valid email address")
+	form.CheckField(validator.NotBlank(form.Password), "password", "This field cannot be blank")
+
+	// If any of the form data is not valid, re-render the login page with the errors (stored in the session data).
+	if !form.Valid() {
+		data := app.newTemplateData(r)
+		data.Form = form
+		app.render(w, http.StatusUnprocessableEntity, "login.tmpl", data)
+	}
+
+	// Authenticate the user credentials. If the credentials are invalid, add a generic non-field error message
+	// and re-display the login page.
+	id, err := app.users.Authenticate(form.Email, form.Password)
+	if err != nil {
+		if errors.Is(err, models.ErrInvalidCredentials) {
+			form.AddNonFieldError("Incorrect email or password")
+
+			// Re-display the login page after modifying the form in the template data.
+			data := app.newTemplateData(r)
+			data.Form = form
+			app.render(w, http.StatusOK, "login.tmpl", data)
+		} else {
+			app.serverError(w, err)
+		}
+		return
+	}
+
+	// Use the RenewToken() method on the current session to change the session ID.
+	// It's good practice to generate a new session ID when the authentication state or privilege level changes
+	// for the user, e.g. login and logout operations.
+	err = app.sessionManager.RenewToken(r.Context())
+	if err != nil {
+		app.serverError(w, err)
+		return
+	}
+
+	// Add the ID of the current user to the session so that they are considered "logged in".
+	app.sessionManager.Put(r.Context(), "authenticatedUserID", id)
+
+	// Redirect the logged in user to the snippet create page.
+	http.Redirect(w, r, "/snippet/create", http.StatusSeeOther)
+}
+
+func (app *application) userLogoutPost(w http.ResponseWriter, r *http.Request) {
+	// Use the RenewToken() method on the current session ID to change the session ID.
+	err := app.sessionManager.RenewToken(r.Context())
+	if err != nil {
+		app.serverError(w, err)
+		return
+	}
+
+	// Remove the authenticatedUserID from the session data so that the user is "logged out".
+	app.sessionManager.Remove(r.Context(), "authenticatedUserID")
+
+	// Add a flash message indicating that the user has been successfully logged out.
+	app.sessionManager.Put(r.Context(), "flash", "You have been logged out successfully!")
+
+	// Redirect the user to the application homepage.
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func ping(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("OK"))
 }

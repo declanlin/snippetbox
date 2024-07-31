@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
 	"time"
+
+	"github.com/go-playground/form/v4"
+	"github.com/justinas/nosurf"
 )
 
 func (app *application) serverError(w http.ResponseWriter, err error) {
@@ -34,7 +38,10 @@ func (app *application) notFound(w http.ResponseWriter) {
 // Function used to initialize a new templateData struct. As of now, all values are zeroed beside CurrentYear.
 func (app *application) newTemplateData(r *http.Request) *templateData {
 	return &templateData{
-		CurrentYear: time.Now().Year(),
+		CurrentYear:     time.Now().Year(),
+		Flash:           app.sessionManager.PopString(r.Context(), "flash"),
+		IsAuthenticated: app.isAuthenticated(r),
+		CSRFToken:       nosurf.Token(r),
 	}
 }
 
@@ -66,4 +73,42 @@ func (app *application) render(w http.ResponseWriter, status int, page string, d
 	// and writing the contents of the buffer to the http.ResponseWriter.
 	w.WriteHeader(status)
 	buf.WriteTo(w)
+}
+
+// Function to decode HTML request form data into a target destination.
+func (app *application) decodePostForm(r *http.Request, dst any) error {
+	// r.ParseForm() adds any data in the POST request bodies to the r.PostForm map.
+	// This works in the same way for PUT and PATCH requests.
+	err := r.ParseForm()
+	if err != nil {
+		return err
+	}
+
+	// Decode the relevant values from the HTML form into the snippetCreateForm struct.
+	err = app.formDecoder.Decode(dst, r.PostForm)
+	if err != nil {
+		// If we use an invalid target destination, the Decode() method will return an error
+		// with the type *form.InvalidDecoderError. We use errors.As() to check for this and raise a panic
+		// rather than return the error.
+
+		var invalidDecoderError *form.InvalidDecoderError
+		if errors.As(err, &invalidDecoderError) {
+			panic(err)
+		}
+
+		// For all other errors, return the error as is.
+		return err
+	}
+
+	// Return without errors if we have successfully decoded the POST form data.
+	return nil
+}
+
+func (app *application) isAuthenticated(r *http.Request) bool {
+	isAuthenticated, ok := r.Context().Value(isAuthenticatedContextKey).(bool)
+	if !ok {
+		return false
+	}
+
+	return isAuthenticated
 }

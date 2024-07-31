@@ -1,23 +1,31 @@
 package main
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"flag"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/alexedwards/scs/mysqlstore"
+	"github.com/alexedwards/scs/v2"
 	"github.com/declanlin/snippetbox/internal/models"
+	"github.com/go-playground/form/v4"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 // Define a structure which stores application-specific dependencies for the execution of server-side operations.
 type application struct {
-	errorLog      *log.Logger
-	infoLog       *log.Logger
-	snippets      *models.SnippetModel
-	templateCache map[string]*template.Template
+	errorLog       *log.Logger
+	infoLog        *log.Logger
+	snippets       models.SnippetModelInterface
+	users          models.UserModelInterface
+	templateCache  map[string]*template.Template
+	formDecoder    *form.Decoder
+	sessionManager *scs.SessionManager
 }
 
 // Define a function which wraps sql.Open() and returns a sql.DB connection pool for a given DSN.
@@ -91,20 +99,49 @@ func main() {
 		errorLog.Fatal(err)
 	}
 
+	// Create a new instance of a *form.Decoder type to be used for decoding HTML form data.
+	formDecoder := form.NewDecoder()
+
+	// Create a new instance of a *scs.SessionManager to be used as a session manager for stateful HTTP transactions.
+	sessionManager := scs.New()
+	// Configure the session manager to use the MYSQL database as the session store, and set a lifetime of 12 hours (so
+	// that sessions expire automatically 12 hours after their creation).
+	// mysqlstore.New() returns a new MYSQLstore instance with a background cleanup goroutine that runs every 5 minutes
+	// to remove expired session data.
+	sessionManager.Store = mysqlstore.New(db)
+	sessionManager.Lifetime = 12 * time.Hour
+
 	// Create an instance of the application structure to store application-specific dependencies for
 	// the execution of server-side operations.
 	app := &application{
-		errorLog:      errorLog,
-		infoLog:       infoLog,
-		snippets:      &models.SnippetModel{DB: db},
-		templateCache: templateCache,
+		errorLog:       errorLog,
+		infoLog:        infoLog,
+		snippets:       &models.SnippetModel{DB: db},
+		users:          &models.UserModel{DB: db},
+		templateCache:  templateCache,
+		formDecoder:    formDecoder,
+		sessionManager: sessionManager,
+	}
+
+	// Initialize a tls.Config struct to hold the non-default TLS settings we want the server to use.
+	// The only thing we are changing in our case is the curve preferences value, so that only
+	// elliptic curves with assembly implementations are used. We are selectively choosing to ignore all
+	// other curves beside the ones specified below due to the fact that they are very CPU intensive. Omitting them
+	// helps ensure that our server will perform well under heavy load.
+
+	tlsConfig := &tls.Config{
+		CurvePreferences: []tls.CurveID{tls.CurveP256, tls.X25519},
 	}
 
 	// Create an instance of an HTTP server which our application will run on.
 	srv := &http.Server{
-		Addr:     *addr,
-		ErrorLog: errorLog,
-		Handler:  app.routes(),
+		Addr:         *addr,
+		ErrorLog:     errorLog,
+		Handler:      app.routes(),
+		TLSConfig:    tlsConfig,
+		IdleTimeout:  time.Minute,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
 
 	// Print an information log to the standard output stream indicating that the server is about to be started.
@@ -112,7 +149,7 @@ func main() {
 
 	// ListenAndServe() listens on the TCP network address srv.Addr and then calls Serve() to handle requests
 	// on incoming connections.
-	err = srv.ListenAndServe()
+	err = srv.ListenAndServeTLS("./tls/cert.pem", "./tls/key.pem")
 
 	// If there is an error listening on the network, log the error. Fatal() is equivalent to errorLog.Println()
 	// followed by a call to os.Exit(1).

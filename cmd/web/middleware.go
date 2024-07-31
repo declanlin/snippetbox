@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
+
+	"github.com/justinas/nosurf"
 )
 
 // A middleware which can be attached to a router to automatically add HTTP security headers to every response,
@@ -64,5 +67,70 @@ func (app *application) recoverPanic(next http.Handler) http.Handler {
 
 		// Proceed with handling the request, passing control to the next middleware or to the final handler.
 		next.ServeHTTP(w, r)
+	})
+}
+
+func (app *application) requireAuthentication(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// (see isAuthenticated in helpers.go)
+		// If the user for the current session is not authenticated, redirect the user to the login page
+		// and return from the middleware chain so that no subsequent handlers are executed.
+		if !app.isAuthenticated(r) {
+			http.Redirect(w, r, "/user/login", http.StatusSeeOther)
+			return
+		}
+
+		// Set the "Cache-Control: no-store" header so that pages that require authentication are not
+		// cached by the user's browser cache (or any other intermediary cache).
+		w.Header().Add("Cache-Control", "no-store")
+
+		// Proceed with handling the request, passing control to the next middleware or to the final handler.
+		next.ServeHTTP(w, r)
+	})
+}
+
+func noSurf(next http.Handler) http.Handler {
+	// Create a NoSurf middleware function which uses a customized CSRF cookie with the
+	// Secure, Path, and HttpOnly attributes set.
+	csrfHandler := nosurf.New(next)
+	csrfHandler.SetBaseCookie(http.Cookie{
+		HttpOnly: true,
+		Path:     "/",
+		Secure:   true,
+	})
+
+	return csrfHandler
+}
+
+func (app *application) authenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Retrieve the authenticatedUserID value from the session using GetInt().
+		// This will return 0 if there is no "authenticatedUserID"
+		id := app.sessionManager.GetInt(r.Context(), "authenticatedUserID")
+		if id == 0 {
+			// Proceed with handling the request, passing control to the next middleware or to the final handler.
+			next.ServeHTTP(w, r)
+
+			return
+		}
+
+		// Check to see if a user with the session user's ID exists in the database.
+		exists, err := app.users.Exists(id)
+		if err != nil {
+			app.serverError(w, err)
+			return
+		}
+
+		// If a matching user record is found, we know the request is coming from an authenticated user
+		// who exists in our database. Create a new copy of the request (with an isAuthenticated value of true in
+		// the request context) and assign it to r.
+		if exists {
+			ctx := context.WithValue(r.Context(), isAuthenticatedContextKey, true)
+			r = r.WithContext(ctx)
+		}
+
+		// Proceed with handling the request, passing control to the next middleware or to the final handler.
+		next.ServeHTTP(w, r)
+
 	})
 }

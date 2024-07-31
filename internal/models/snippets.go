@@ -116,3 +116,9 @@ func (m *SnippetModel) Latest() ([]*Snippet, error) {
 	// Return the queried rows as a slice of Snippet struct pointers with no errors.
 	return snippets, nil
 }
+
+type SnippetModelInterface interface {
+	Insert(title string, content string, expires int) (int, error)
+	Get(id int) (*Snippet, error)
+	Latest() ([]*Snippet, error)
+}
